@@ -226,6 +226,19 @@ SECTIONS
   PROVIDE( __bss_start = __tbss_start );
   PROVIDE( __bss_size = __bss_end - __bss_start );
 
+  /*
+    复位不清零的 RAM 段。只给 ps2test 固件的"手柄测试统计"用：
+    ST-Link 每读一次 RAM 都会复位芯片，统计放普通 .bss 里一读就被启动代码清零。
+    NOLOAD = 启动代码既不初始化也不清零，只有断电才丢。
+    正常固件不往这里放东西，段长度会是 0，不占 RAM。
+  */
+  .persist (NOLOAD) : ALIGN(4)
+  {
+    KEEP(*(.persist))
+    KEEP(*(.persist.*))
+    . = ALIGN(4);
+  } >RAM
+
   /* User_heap_stack section, used to check that there is enough RAM left */
   ._user_heap_stack (NOLOAD) :
   {

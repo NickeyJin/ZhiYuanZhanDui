@@ -1,7 +1,17 @@
-# MyFirstCar —— STM32F103C8T6 四轮小车（基础移动版）
+# MyFirstCar —— 四轮麦轮全向底盘 + 四轴机械臂（STM32F103C8T6）
 
-当前版本只做一件事：**上电自检 + PS2 无线手柄控制四个轮子正常移动**。
-舵机（servo）和麦轮全向解算（mailun）已经删掉，代码结构重新分成清晰的四层。
+致远战队比赛用机器人固件：PS2 无线手柄遥控，四轮麦克纳姆轮全向移动 + 四舵机机械臂拣放方块。
+
+- **底盘**：4× TT 减速电机 + 60mm 麦轮，3 片 DRV8833 驱动 8 路 PWM（20kHz）；
+  `vx/vy/ω` 三自由度麦轮逆解，左摇杆只取主导轴走四方向，右摇杆原地自转。
+- **机械臂**：TIM4 四路 50Hz 舵机（肩 / 肘 / 腕 / 爪），点动 + 上电初始位 + 一键放块宏。
+- **现场调参**：总速度、四轮单轮补偿、前后配平三组旋钮，值存在 RAM `.persist` 段（复位不丢、断电才丢）。
+- **反馈**：只有 PC13 灯，靠灯语（按键快闪 / 推杆中闪 / 常亮 / 急停慢闪）。
+- 调试不靠串口：板子只引出 SWD，所有状态用 `build\tools\read_vars.ps1` 读 RAM 变量核对。
+
+> 📄 **开发日志（按功能板块、按完成时间排列）在 [`docs/`](docs/) 目录**，
+> 从 [`docs/00-项目总览.md`](docs/00-项目总览.md) 进入。开源组件说明见
+> [`docs/05-开源组件与参考资料.md`](docs/05-开源组件与参考资料.md)。
 
 ---
 
@@ -10,134 +20,125 @@
 ```
 Core/
 ├── Inc/  Src/
-│   ├── main.c      CubeMX 生成的主程序，只负责初始化 → app_init() → while(1) app_task()
-│   ├── motor.c/h   硬件层：一个轮子 = DRV8833 一路 H 桥 = 2 路 PWM
-│   ├── chassis.c/h 运动层：前进/转向 → 四个轮子的速度（两轴差速模型）
-│   ├── ps2.c/h     输入层：PS2 手柄软件模拟时序，读 9 字节一帧
-│   ├── app.c/h     应用层：上电自检 + 20ms 主循环（手柄 → 底盘）
-│   └── dwt_delay.c/h  DWT 周期计数器做 µs 级延时（PS2 时序靠它）
+│   ├── main.c        CubeMX 生成的主程序：初始化 → app_init() → while(1) app_task()
+│   ├── app.c/h       应用层：20ms 主循环（手柄 → 保护 → 解算 → 斜坡 → 底盘/机械臂 → 灯）
+│   ├── motor.c/h     硬件层：一个轮子 = DRV8833 一路 H 桥 = 2 路 PWM；含起步补偿
+│   ├── chassis.c/h   运动层：vx/vy/ω → 四个轮速（麦轮逆解）
+│   ├── ps2.c/h       输入层：PS2 手柄软件模拟 SPI，9 字节一帧（位宽 16µs）
+│   ├── dwt_delay.c/h 底层时基：DWT 周期计数器做 µs 级延时
+│   ├── arm.c/h       机械臂：四路舵机点动、上电初始位、`R2+R1` 放块宏状态机
+│   ├── tune.c/h      现场调参：总速度/单轮补偿/前后配平旋钮 + 灯语
+│   └── board.h       板级定义：PC13 灯态与非阻塞闪烁
+build/tools/
+├── direct_build.ps1  直接调 arm-none-eabi-gcc 编译（产物 build\direct\MyFirstCar.elf）
+├── flash.ps1         STM32_Programmer_CLI 烧录 + 校验 + 复位
+└── read_vars.ps1     经 ST-LINK GDB server 只读地读 RAM 变量
 ```
 
-依赖方向是单向的：`app → chassis → motor`，`app → ps2`。没有循环依赖。
+依赖方向单向：`app → chassis → motor`、`app → ps2`、`app → arm`、`app → tune`。
+约定：**控制回路里绝不用 `HAL_Delay()`**（20ms 节拍会被顶爆，手柄掉帧），只用 `HAL_GetTick()` 做非阻塞计时。
 
 ---
 
-## 2. 接线（按引脚总表）
+## 2. 引脚
 
-### 电机（3 片 DRV8833，共 8 路 PWM）
+| 功能 | 引脚 | 说明 |
+|---|---|---|
+| 左前 FL / 右前 FR / 左后 RL / 右后 RR | PA0/PA1、PA2/PA3、PB0/PB1、PA8/PA11 | TIM2_CH1/CH2、TIM2_CH3/CH4、TIM3_CH3/CH4、TIM1_CH1/CH4，PSC=71/ARR=49 → 20kHz |
+| PS2 DATA / CMD / ATT / CLK | PA4 / PA5 / PA6 / PA7 | DATA 内部上拉 |
+| 舵机 肩 / 肘 / 腕 / 爪 | PB6 / PB7 / PB8 / PB9 | TIM4_CH1~CH4，50Hz，500~2500µs |
+| 状态灯 | PC13 | 低电平点亮 |
+| SWD | PA13 / PA14 | 禁止挪用 |
 
-| 轮位 | 说明 | IN1 | IN2 | 定时器 |
-|------|------|-----|-----|--------|
-| 1 | 左前 FL | PA0 | PA1 | TIM2_CH1 / CH2 |
-| 2 | 右前 FR | PA2 | PA3 | TIM2_CH3 / CH4 |
-| 3 | 左后 RL | PB0 | PB1 | TIM3_CH3 / CH4 |
-| 4 | 右后 RR | PA8 | PA11 | TIM1_CH1 / CH4 |
+四条铁律（违反任何一条都表现为"完全没反应"）：
 
-- 三个定时器都是 **PSC=0 / ARR=3599 → 20kHz**，高于人耳上限，电机不啸叫。
-- DRV8833 **没有独立方向脚**，每个电机必须占 2 路 PWM，所以 4 个电机吃掉 8 路。
-- 真值表：`IN1=PWM,IN2=0` 正转；`IN1=0,IN2=PWM` 反转；`0,0` 滑行；`1,1` 刹车。
-
-### PS2 接收器（6 针）
-
-| 接收器 | 板子 | 说明 |
-|--------|------|------|
-| DATA | PA4 | 输入 + 内部上拉 |
-| CMD  | PA5 | 推挽输出 |
-| ATT  | PA6 | 推挽输出，低有效 |
-| CLK  | PA7 | 推挽输出 |
-| VCC  | 3V3 | 用 3V3 最稳 |
-| GND  | GND | **必须共地** |
-
-### 状态灯
-
-PC13，**低电平点亮**，只能点灯，不能带负载。
+1. 舵机红线**绝不接板载 3V3**，必须走独立 5V（MG995 堵转 1A+ 会把 MCU 拉复位）；
+2. 全系统共地（降压板、蓝板、每片 DRV8833）；
+3. 每片 DRV8833 的 nSLEEP 各用 10kΩ 上拉到 3V3（悬空 = 芯片睡眠 = 电机不动）；
+4. PA13/PA14 是 SWD，别动。
 
 ---
 
-## 3. 四条铁律（不遵守就是"完全没反应"）
+## 3. 手柄操作
 
-1. **舵机红线绝不接板载 3V3**，必须外接 5V。（本版本已无舵机代码，将来加回来也一样）
-2. **所有 GND 必须共地**：降压板、蓝板、每片 DRV8833。
-3. **每片 DRV8833 的 nSLEEP 各接 10kΩ 上拉到 3V3**。悬空 = 芯片睡眠 = 电机一动都不动。
-4. **PA13 / PA14 是 SWD 调试口，永远别动**，一碰就再也烧不进去。
+| 按键 | 功能 |
+|---|---|
+| 左摇杆（只取主导轴） | 前 / 后 / 左 / 右 平移（四个 90° 扇区，不斜走） |
+| 右摇杆左右 | 原地自转 |
+| 按住 L1 | 速度减半（精细走位） |
+| SELECT + ↑ / ↓ | 前后配平旋钮 |
+| SELECT + ← / → | 总速度旋钮 |
+| SELECT + L2 / L1 / R2 / R1 + ← / → | 单轮补偿：左前 / 左后 / 右前 / 右后 |
+| START | 急停（底盘停 + 机械臂松劲，灯慢闪） |
+| SELECT + START | 机械臂四路通电 / 松劲 |
+| ↑ / ↓ · ← / → · △ / × · □ / ○ | 肩 · 肘 · 腕 · 爪 点动 |
+| 按住 L1 / R1（点动时） | 点动 1/3 速 / 3 倍速 |
+| R2 + R1 | 放块宏：三轴走到放块位 → 张爪丢块 → 回到按键前姿态 |
 
-两个常见坑：
-- 蓝板 5V 排针直连 mini-USB 的 VBUS —— 只插 ST-Link 时那里没电。
-- "电机一转 MCU 就复位" —— 细地线压降 + 换向噪声串进 3V3。给电机电源单独走线，MCU 电源加滤波电容。
-
----
-
-## 4. 上电会发生什么
-
-1. **PC13 灯闪 3 下** —— 提示"我要开始动轮子了，手拿开"。
-2. 四个轮子依次点动：**左前 → 右前 → 左后 → 右后**，每个都先按"前进"方向转 0.3s，停一下，再反转 0.3s。
-3. 四轮一起**前进 0.5s → 停 → 后退 0.5s → 停**。
-4. **灯常亮** = 自检结束，进入手柄控制。
-
-> 第一次上电建议把车架起来（轮子悬空），万一转向不对也不会冲出去。
-
-### 自检怎么看结果
-
-| 现象 | 原因 | 怎么办 |
-|------|------|--------|
-| 某个轮子**完全不动** | 该片 DRV8833 的 nSLEEP 悬空 / 没共地 / 电机线没插 | 先量 nSLEEP 是不是 3V3 |
-| 某个轮子**转向反了** | 电机两根线接反了 | 两种改法：①对调电机的两根线；②把 `Core/Src/motor.c` 里 `motor_map[]` 对应那一行的 `invert` 改成 `1` |
-| 四个轮子**全不动** | 电池没电 / 电机电源没接 / 所有 nSLEEP 都悬空 | 量 VM 电压（电池 7.4V，满电 8.4V） |
-| 一上电就重启 | 电源被电机拉垮 | 见上面第 2 个坑 |
+手柄掉线（`ps2_ok == 0`）自动停车；接收器须处于**模拟红灯模式**（ID `0x73`）。
 
 ---
 
-## 5. 手柄操作
+## 4. 编译 / 烧录 / 读变量
 
-| 动作 | 结果 |
-|------|------|
-| 左摇杆 **上 / 下** | 前进 / 后退 |
-| 左摇杆 **左 / 右** 或 右摇杆 **左 / 右** | 左转 / 右转（哪个推得多听哪个） |
-| 按住 **START** | 急停（四轮滑行） |
-| 接收器掉线 / 跑太远 | 灯灭 + 自动停车（`ps2_ok == 0` 就停，不会拿脏数据乱冲） |
-
-摇杆死区 12（`APP_STICK_DEADZONE`），推到底 = 满速 600（`APP_SPEED_MAX`）。
-
----
-
-## 6. 想改的东西在哪
-
-| 想改什么 | 改哪 |
-|----------|------|
-| 不想要上电自检，直接进手柄控制 | `Core/Inc/app.h` 里 `APP_SELFTEST_ENABLE` 改成 `0` |
-| 太快 / 太慢 | `Core/Inc/app.h` 里 `APP_SPEED_MAX`（当前 600，上限受 `CHASSIS_SPEED_MAX`=800 限制） |
-| 摇杆太灵敏 / 太迟钝 | `Core/Inc/app.h` 里 `APP_STICK_DEADZONE`（当前 12） |
-| 某个轮子转向反了 | `Core/Src/motor.c` 里 `motor_map[]` 的 `invert` |
-| 自检转速 / 时长 | `Core/Src/app.c` 顶部 `TEST_SPEED` / `TEST_RUN_MS` / `TEST_GAP_MS` / `TEST_WHEEL_GAP` |
-| 转弯半径太大（想原地转） | `Core/Src/chassis.c` 里 `chassis_drive()` 的左右分配方式 |
-
----
-
-## 7. 编译
-
-工程是 CubeMX + CMake + Ninja + arm-none-eabi-gcc（`arm-none-eabi-gcc 14.3.1`）。
-
-**STM32CubeIDE / VS Code（CMake Tools）**：直接打开工程根目录，选 Debug preset 编译即可。
-
-**命令行**（必须给工具链文件加引号，否则 PowerShell 会把 `.cmake` 当独立参数拆开）：
+工具链：GNU Tools for STM32 **14.3.1+st.2**（ST 打包）。
 
 ```powershell
-$env:PATH = "<STM32CubeIDE>\plugins\...gnu-tools-for-stm32...\tools\bin;$env:PATH"
-cmake -S . -B build/Debug -G Ninja `
-      '-DCMAKE_BUILD_TYPE=Debug' `
-      '-DCMAKE_TOOLCHAIN_FILE=cmake/gcc-arm-none-eabi.cmake' `
-      "-DCMAKE_MAKE_PROGRAM=<ninja.exe 绝对路径>"
-cmake --build build/Debug
+# 编译（绕过 CMake try_compile，直接调 gcc；产物 build\direct\MyFirstCar.elf）
+powershell -NoProfile -ExecutionPolicy Bypass -File build\tools\direct_build.ps1
+
+# 烧录（ST-LINK + SWD，含校验与复位）
+powershell -NoProfile -ExecutionPolicy Bypass -File build\tools\flash.ps1
+
+# 读 RAM 变量（只读；会短暂 halt 芯片，读前记得车/臂已停稳）
+powershell -NoProfile -ExecutionPolicy Bypass -File build\tools\read_vars.ps1 `
+  -Symbols 't_fw_id,t_persist_magic,t_arm_magic,t_arm_lo,t_arm_hi,t_speed_scale,t_wheel_delta'
 ```
 
-产物：`build/Debug/MyFirstCar.elf`（用 ST-Link 烧这个）。
-
-当前实测占用量：**FLASH 12064 B / 64 KB（18.4%）**，**RAM 1824 B / 20 KB（8.9%）**。
+也可以用 CubeMX + CMake preset 编译（`build/Debug`）。两套产物的 `.persist` 布局不同，
+**读变量时必须用与板上固件同版本的 ELF**，否则读到的是错位的垃圾值。
 
 ---
 
-## 8. 设计与制作文档（中期考核）
+## 5. 上电会发生什么
 
-- **[docs/智能车设计与制作日志.md](docs/智能车设计与制作日志.md)**：按机器人功能划分的 8 个板块（功能描述 + 按时间排序的开发历程），含已实现功能一览、物资清单与成本、开源项目与第三方库说明；配图在 `docs/images/`（24 张）。
+1. 灯快闪 3 下（初始化完成签名）；
+2. 底盘不动作、机械臂**保持松劲**（防止上电自动追位把结构扭坏）；
+3. 按 `SELECT + START` 后机械臂四路通电，走到**上电初始位**（爪子完全闭合的抓取姿态：肩 1082 / 肘 2500 / 腕 2004 / 爪 570 µs）；
+4. 之后即为正常遥控状态：灯 = 按键快闪 / 推杆中闪 / 常亮。
 
-队伍：致远战队（实训战队：千里战队）｜队长：傅国钊｜2026 年中期考核
+---
+
+## 6. 想改参数去哪
+
+| 想改什么 | 改哪 |
+|---|---|
+| 底盘速度上限 / 斜坡 / 死区 | `Core/Inc/app.h` 的 `APP_SPEED_MAX` / `APP_RAMP_MS` / `APP_STICK_DEADZONE` 等 |
+| 满速占空比、起步补偿 | `Core/Inc/motor.h` 的 `MOTOR_DUTY_PERCENT` / `MOTOR_KICK_MS` / `MOTOR_KICK_GAIN` / `MOTOR_KICK_MIN` |
+| 某轮转向反了 | `Core/Src/motor.c` 的 `motor_map[]` 里该轮 `invert` |
+| 调参默认值（总速度 / 单轮补偿 / 配平） | `Core/Src/tune.c` 的 `defaults_init()` |
+| 舵机软限位 / 点动速度 / 上电初始位 / 放块参数 | `Core/Inc/arm.h` |
+| 改软限位后不生效 | `.persist` 里旧 magic 仍有效会沿用旧值 → 把 `arm.c` 的 `ARM_MAGIC` 版本号抬一位 |
+| 读变量读出来全是垃圾 | ELF 与板上固件不同版本，或芯片刚复位还没跑初始化（等 3~5s 再读） |
+
+---
+
+## 7. 仓库结构
+
+```
+.
+├── README.md                本文件
+├── docs/                    开发日志（按功能板块、按完成时间排列）
+│   ├── 00-项目总览.md       索引 + 约束 + 时间线
+│   ├── 01-主控与电源平台.md
+│   ├── 02-底盘与全向移动.md
+│   ├── 03-遥控与现场调参.md
+│   ├── 04-机械臂与夹取.md
+│   ├── 05-开源组件与参考资料.md
+│   └── 历史归档/            开发过程中的临时清单与旧模块说明（部分内容已过时）
+├── Core/Inc/ Core/Src/      固件源码
+├── Drivers/                 ST HAL + CMSIS（官方，未修改）
+├── cmake/                   CubeMX 生成的构建模板
+├── STM32F103xx_FLASH.ld     链接脚本（FLASH 62K + RAM `.persist` 段）
+└── build/tools/             编译 / 烧录 / 读变量脚本
+```

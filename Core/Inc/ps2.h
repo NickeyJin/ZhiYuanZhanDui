@@ -23,13 +23,26 @@ extern uint8_t ps2_btn2;            /* 按键组2（按下 = 1）*/
 extern uint8_t ps2_lx, ps2_ly;      /* 左摇杆 左右 / 上下，中位 0x80 */
 extern uint8_t ps2_rx, ps2_ry;      /* 右摇杆 左右 / 上下，中位 0x80 */
 
+/*
+ * 诊断用（调试器直接读变量就能看出问题在哪一层）：
+ *   ps2_raw     最近一帧读回来的 9 个字节，不管合不合法都留着。
+ *               没接接收器/没对码时 DATA 被内部上拉拉高，这 9 个字节就是全 0xFF。
+ *   ps2_raw[1]  就是手柄回的 ID：0x41 = 数字模式（摇杆无效！）
+ *                              0x73 / 0x53 = 模拟模式（摇杆有效）
+ *   ps2_ok_cnt / ps2_bad_cnt  累计有效 / 无效帧数，看链路稳不稳。
+ */
+extern uint8_t  ps2_raw[9];
+extern uint32_t ps2_ok_cnt;
+extern uint32_t ps2_bad_cnt;
+extern uint32_t ps2_mode_try_cnt;  /* 读到 0x41 时自动切模拟模式的重试次数 */
+extern uint32_t ps2_mode_ok_cnt;   /* 其中成功的次数（>0 = 数字模式能自动救回来） */
+
 /* PS2 摇杆的中位和量程 */
 #define PS2_STICK_CENTER   0x80
 #define PS2_STICK_MAX      127
 
 /* ---- 按键组1 的 8 个位 ---- */
 #define PS2_BTN_SELECT  0x01
-#define PS2_BTN_L3      0x02
 #define PS2_BTN_R3      0x04
 #define PS2_BTN_START   0x08
 #define PS2_BTN_UP      0x10
@@ -48,6 +61,6 @@ extern uint8_t ps2_rx, ps2_ry;      /* 右摇杆 左右 / 上下，中位 0x80 *
 #define PS2_BTN_SQUARE    0x80   /* 方块 */
 
 void ps2_init(void);
-void ps2_poll(void);        /* 读一帧并解析，建议 20~50ms 调一次 */
+void ps2_poll(void);
 
 #endif /* PS2_H */

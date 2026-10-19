@@ -38,18 +38,17 @@ add_executable(${CMAKE_PROJECT_NAME}
     Core/Inc/chassis.h
     Core/Inc/ps2.h
     Core/Inc/app.h
-    Core/Inc/diag.h
+    Core/Inc/tune.h
+    Core/Inc/arm.h
     Core/Src/motor.c
     Core/Src/chassis.c
     Core/Src/ps2.c
     Core/Src/dwt_delay.c
     Core/Src/app.c
-    Core/Src/diag.c
-  # ---- 机械臂舵机 + 示教录制回放（自带 TIM4 初始化，不依赖 CubeMX）----
-  Core/Inc/servo.h
-  Core/Inc/teach_only.h
-  Core/Src/servo.c
-  Core/Src/teach_only.c)
+    Core/Src/tune.c
+    Core/Src/arm.c
+    Core/Src/main.c
+)
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)

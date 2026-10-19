@@ -1,3 +1,9 @@
-build
+build/*
+!build/tools/
+build/tools/*
+!build/tools/direct_build.ps1
+!build/tools/flash.ps1
+!build/tools/read_vars.ps1
 mx.scratch
 !.settings
+_removed_servo_20261018/
